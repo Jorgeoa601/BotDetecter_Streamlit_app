@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+scikit-learn
+plotly
+regex
+emoji
+# unicodedata
+# Para el modelo de embeddings BETO
+sentence-transformers
+# Si usas Python 3.7 o superior, unicodedata ya está incluido

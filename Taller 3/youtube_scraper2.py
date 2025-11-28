@@ -72,22 +72,15 @@ def adaptar_csv_para_streamlit(nombre_csv):
     df['timestamp'] = df['date']
     df['replies'] = df['replies'].apply(lambda x: len(eval(x)) if isinstance(x, str) and x.startswith('[') else 0)
     df_final = df[['user_id', 'text', 'timestamp', 'likes', 'replies']]
-    df_final.to_csv("youtube_para_streamlit.csv", index=False)
-    print("Archivo adaptado guardado como youtube_para_streamlit.csv")
+    df_final.to_csv("youtube_para_streamlit2.csv", index=False)
+    print("Archivo adaptado guardado como youtube_para_streamlit2.csv")
 
 
 if __name__ == "__main__":
     # Pega aquí tu API key y el ID del video
     API_KEY = "AIzaSyALRGIQsSWMoWpLKawlDDfZdZjIwMfG9YE"
-    VIDEO_ID = "3H8v5hziohk"
+    VIDEO_ID = "336UXCY3Fl8"
     get_comments(API_KEY, VIDEO_ID)
     # Adaptar el CSV generado automáticamente
     nombre_csv = f"{VIDEO_ID}_user_comments.csv"
     adaptar_csv_para_streamlit(nombre_csv)
-
-
-# Para adaptar el CSV al formato de la app Streamlit:
-# 1. Renombra las columnas: user_name -> user_id, comment -> text, date -> timestamp
-# 2. replies: cuenta la cantidad de respuestas (len), shares pon 0
-# 3. El campo likes ya está incluido
-# 4. Guarda el archivo con las columnas: user_id, text, timestamp, likes, replies, shares

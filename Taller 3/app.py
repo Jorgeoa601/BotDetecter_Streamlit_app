@@ -1,185 +1,348 @@
+# app.py
 import streamlit as st
 import pandas as pd
-
-import re
-import unicodedata
-
-from sentence_transformers import SentenceTransformer
 import numpy as np
-
-from sklearn.ensemble import IsolationForest
 import plotly.express as px
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="Detección de Bots en Redes Sociales", layout="wide")
+# --- Importaciones de Módulos ---
+from src.features import procesar_datos
+from src.model import entrenar_y_predecir
 
-# Título y descripción
-st.title("Detección de Bots en Redes Sociales")
+# ================= CONFIGURACIÓN DE PÁGINA =================
+st.set_page_config(
+    page_title="BotBuster: Detector de Anomalías",
+    page_icon="🤖",
+    layout="wide"
+)
+
+# ================= ESTILOS CSS PERSONALIZADOS =================
 st.markdown("""
-Esta aplicación permite detectar posibles cuentas automatizadas (bots) en una red social, utilizando técnicas de procesamiento de lenguaje natural (NLP) y modelos de detección de anomalías.
-""")
+<style>
+    .main-header {font-size: 36px; font-weight: bold; color: #1E88E5; text-align: center;}
+    .sub-header {font-size: 18px; color: #666; text-align: center; margin-bottom: 20px;}
+    .card {background-color: #f9f9f9; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);}
+    .metric-box {text-align: center; padding: 10px; background: #e3f2fd; border-radius: 8px;}
+</style>
+""", unsafe_allow_html=True)
 
-# Cargar archivo CSV o usar dataset de ejemplo
-st.sidebar.header("Carga de datos")
-opcion = st.sidebar.radio("Selecciona una opción:", ("Subir archivo CSV", "Usar dataset de ejemplo"))
 
-def cargar_ejemplo():
-	data = {
-		'user_id': ['u1', 'u2', 'u1', 'u3'],
-		'text': [
-			'Me encanta la inteligencia artificial!',
-			'Compra seguidores baratos aquí',
-			'Hoy es un gran día para aprender',
-			'Sigue mi canal para más sorteos'
-		],
-		'timestamp': ['2025-11-20', '2025-11-20', '2025-11-21', '2025-11-21'],
-		'likes': [10, 0, 5, 1],
-		'replies': [2, 0, 1, 0]
-	}
-	return pd.DataFrame(data)
+# ================= INTERFAZ PRINCIPAL =================
+st.markdown('<div class="main-header">🤖 Detector de Bots con BETO & Isolation Forest</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Análisis semántico y conductual para detección de anomalías</div>', unsafe_allow_html=True)
 
-# --- Preprocesamiento de texto ---
-def limpiar_texto(texto):
-	if pd.isnull(texto):
-		return ""
-	# Quitar acentos
-	texto = unicodedata.normalize('NFKD', texto).encode('ascii', 'ignore').decode('utf-8', 'ignore')
-	# Convertir a minúsculas
-	texto = texto.lower()
-	# Quitar caracteres especiales y números
-	texto = re.sub(r'[^a-zA-Z\s]', '', texto)
-	# Quitar espacios extra
-	texto = re.sub(r'\s+', ' ', texto).strip()
-	return texto
+# --- Sidebar ---
+st.sidebar.header("📂 Configuración")
+opcion = st.sidebar.radio("Datos de entrada:", ["Dataset de Ejemplo", "Subir CSV"])
 
-# --- Agrupamiento por usuario ---
-def agrupar_por_usuario(df):
-	# Agrupa los textos y suma interacciones por usuario
-	agrupado = df.groupby('user_id').agg({
-		'text': lambda x: ' '.join(x),
-		'likes': 'sum',
-		'replies': 'sum',
-		'timestamp': 'count'  # número de publicaciones
-	}).rename(columns={'timestamp': 'num_posts'})
-	agrupado = agrupado.reset_index()
-	return agrupado
+# Slider para el umbral de riesgo (Rango ajustado de 0.0 a 1.0)
+umbral_risk_score = st.sidebar.slider(
+    "Umbral de Detección de Bots (Risk Score)",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.75, 
+    step=0.01,
+    format='%.2f'
+)
+st.sidebar.info(f"Un usuario se clasifica como Bot si su Risk Score es > {umbral_risk_score*100:.0f}%")
 
-# --- Rasgos léxicos y de comportamiento ---
-def calcular_rasgos(df_agrupado):
-	# Longitud promedio del texto (en palabras)
-	df_agrupado['longitud_promedio'] = df_agrupado['text'].apply(lambda x: len(x.split()) if isinstance(x, str) else 0)
-	# Diversidad léxica: palabras únicas / total de palabras
-	def diversidad_lexica(texto):
-		palabras = texto.split()
-		if len(palabras) == 0:
-			return 0
-		return len(set(palabras)) / len(palabras)
-	df_agrupado['diversidad_lexica'] = df_agrupado['text'].apply(diversidad_lexica)
-	return df_agrupado
+df_raw = None
 
-df = None
-if opcion == "Subir archivo CSV":
-	archivo = st.sidebar.file_uploader("Sube tu archivo CSV", type=["csv"])
-	if archivo is not None:
-		df = pd.read_csv(archivo)
+if opcion == "Dataset de Ejemplo":
+    # Datos sintéticos más robustos para el ejemplo
+    data = {
+        'user_id': ['bot1']*5 + ['userA']*3 + ['bot2']*10 + ['userB']*4,
+        'text': [
+            'Gana dinero rápido! Visita mi bio: http://spam.com', 'Gana dinero rápido! Visita mi bio: http://spam.com', 'Click en mi bio', 'Gana dinero rápido! Visita mi bio: http://spam.com', 'Oferta limitada! @otro_user', # Bot 1 (Repetitivo con ruido)
+            'Me gustó mucho el video, gran trabajo 👍', 'Gracias por la info, muy útil.', '¿Podrías hablar de Python? #coding', # User A (Normal)
+            'Suscríbete', 'Suscríbete', 'Suscríbete', 'Suscríbete', 'Suscríbete', 'Suscríbete', 'Suscríbete', 'Suscríbete', 'Suscríbete', 'Suscríbete', # Bot 2 (Spam agresivo)
+            'Jajaja que risa 😂', 'No estoy de acuerdo con eso.', 'Buen punto, lo consideraré.', 'Saludos desde Chile' # User B (Normal)
+        ],
+        'timestamp': pd.to_datetime(['2023-01-01 12:00']*5 + ['2023-01-01 14:00']*3 + ['2023-01-01 03:00']*10 + ['2023-01-02 10:00']*4),
+        'likes': [0,0,1,0,0, 10,5,2, 0,0,0,0,0,0,0,0,0,0, 12,3,5,8],
+        'replies': [0]*5 + [2,1,4] + [0]*10 + [1,0,2,3]
+    }
+    df_raw = pd.DataFrame(data)
+    st.info("ℹ️ Usando dataset de demostración generado.")
 else:
-	df = cargar_ejemplo()
+    file = st.sidebar.file_uploader("Sube tu CSV (cols: user_id, text, timestamp, likes, replies)", type="csv")
+    if file:
+        df_raw = pd.read_csv(file)
+    else:
+        st.warning("Sube un archivo para continuar.")
+        st.stop()
 
-# Mostrar los datos cargados
-if df is not None:
-	st.subheader("Vista previa de los datos")
-	st.dataframe(df)
-	# Preprocesamiento
-	st.subheader("Preprocesamiento de texto")
-	df['text_limpio'] = df['text'].apply(limpiar_texto)
-	st.dataframe(df[['user_id', 'text', 'text_limpio']])
+# ================= 5. DETALLE DEL PIPELINE DE PROCESAMIENTO (DIDÁCTICO) =================
+if df_raw is not None:
+    # 1. LLAMADA A INGENIERÍA DE RASGOS (features.py)
+    with st.spinner('⚙️ Procesando textos y calculando métricas de comportamiento...'):
+        df_users, df_processed_posts = procesar_datos(df_raw)
+        
+        # Validación de nulos (Crucial para no romper sklearn)
+        df_users = df_users.fillna(0)
 
-	# Agrupamiento por usuario
-	st.subheader("Datos agrupados por usuario")
-	df_agrupado = agrupar_por_usuario(df)
-	st.dataframe(df_agrupado)
+    st.header("Detalle del Pipeline de Procesamiento")
+    st.markdown("Esta sección muestra los datos antes de la detección de anomalías.")
 
-	# Cálculo de rasgos léxicos y de comportamiento
-	st.subheader("Rasgos léxicos y de comportamiento por usuario")
-	df_rasgos = calcular_rasgos(df_agrupado)
-	st.dataframe(df_rasgos)
+    # --- Tabla 1: Datos Crudos ---
+    with st.expander("▶️ 4.1. Visualización de Datos Crudos (Input)"):
+        st.subheader("Datos de Entrada Originales")
+        st.dataframe(df_raw, use_container_width=True)
 
-	# Embeddings semánticos con Sentence-BERT/MiniLM
-	st.subheader("Embeddings semánticos (Sentence-BERT/MiniLM)")
-	with st.spinner("Calculando embeddings semánticos..."):
-		modelo = SentenceTransformer('all-MiniLM-L6-v2')
-		textos_usuarios = df_rasgos['text'].tolist()
-		embeddings = modelo.encode(textos_usuarios)
-		# Guardar la dimensión del embedding para mostrar
-		st.write(f"Dimensión del embedding: {embeddings.shape[1]}")
-		# Mostrar los primeros valores del embedding del primer usuario como ejemplo
-		st.write("Ejemplo de embedding para el primer usuario:")
-		st.write(embeddings[0][:10])  # Solo los primeros 10 valores para no saturar la vista
-	# Puedes guardar los embeddings en el DataFrame si lo necesitas para el siguiente paso
-	df_rasgos['embedding'] = list(embeddings)
+    # --- Tabla 2: Métrica de Post Limpio (Detalle por fila) ---
+    with st.expander("▶️ 4.2. Preprocesamiento (Textos Limpios)"):
+        st.subheader("Texto Después de la Limpieza")
+        st.markdown("URLs, menciones, hashtags y emojis han sido eliminados.")
+        st.dataframe(df_processed_posts, use_container_width=True, hide_index=True)
 
-	# --- Detección de anomalías ---
-	st.subheader("Detección de anomalías (Isolation Forest)")
-	# Seleccionar rasgos numéricos y embeddings
-	rasgos_numericos = df_rasgos[['likes', 'replies', 'num_posts', 'longitud_promedio', 'diversidad_lexica']].values
-	embeddings_matrix = np.vstack(df_rasgos['embedding'].values)
-	X = np.hstack([rasgos_numericos, embeddings_matrix])
 
-	# Entrenar Isolation Forest
-	modelo_iso = IsolationForest(contamination=0.2, random_state=42)
-	modelo_iso.fit(X)
-	scores = modelo_iso.decision_function(X)
-	anomalía = modelo_iso.predict(X)
-	# -1 es anómalo, 1 es normal
-	df_rasgos['anomaly_score'] = -scores  # Mayor score = más anómalo
-	df_rasgos['es_sospechoso'] = (anomalía == -1)
+    # --- Tabla 3: Ingeniería de Rasgos (Agrupado por usuario) ---
+    with st.expander("▶️ 4.3. Ingeniería de Rasgos (Métricas Agrupadas por Usuario)"):
+        st.subheader("Variables de Comportamiento y Léxicas")
+        st.markdown("Estas variables se usan para entrenar el modelo de detección de anomalías, junto con los *embeddings*.")
+        
+        # Seleccionamos las columnas clave para mostrar todas las métricas calculadas
+        cols_to_display = [
+            'user_id', 'num_posts', 
+            'intervalo_medio', 
+            'frecuencia_diaria', 'nocturnidad', 
+            'avg_likes', 'avg_replies', 
+            'ttr', 'tasa_repeticion', 'longitud_promedio'
+        ]
+        
+        df_metrics_display = df_users[cols_to_display].copy()
+        
+        # IMPORTANTE: Eliminamos el formateo a STRING de nocturnidad y tasa_repeticion
+        # para que Streamlit pueda usar column_config.NumberColumn
+        df_metrics_display['intervalo_medio'] = df_metrics_display['intervalo_medio'].map(lambda x: f'{x:.2f}')
+        df_metrics_display['frecuencia_diaria'] = df_metrics_display['frecuencia_diaria'].map(lambda x: f'{x:.2f}')
+        df_metrics_display['nocturnidad'] = df_metrics_display['nocturnidad'].map(lambda x: f'{x:.2%}')
+        df_metrics_display['tasa_repeticion'] = df_metrics_display['tasa_repeticion'].map(lambda x: f'{x:.2%}')
+        # Los demás valores (nocturnidad, tasa_repeticion) se dejan como float (0 a 1)
+        
+        st.dataframe(
+            df_metrics_display, 
+            use_container_width=True,
+            column_config={
+                "intervalo_medio": st.column_config.NumberColumn("Intervalo Medio (min)", format="%.2f min"),
+                "frecuencia_diaria": st.column_config.NumberColumn("Posts/Día (Aprox)", format="%.2f"),
+                "nocturnidad": "Actividad Nocturna",
+                "ttr": "Diversidad Léxica",
+                "tasa_repeticion": "Tasa de Repetición",
+                "longitud_promedio": "Longitud Promedio",
+                "avg_likes": "Likes Promedio",
+                "avg_replies": "Respuestas Promedio"
+            },
+            hide_index=True
+        )
+    
+    st.divider()
+    
+    # 2. LLAMADA AL MODELO (model.py)
+    df_users, features_conducta = entrenar_y_predecir(df_users, umbral_risk_score)
 
-	# Mostrar ranking de sospechosos
-	st.subheader("Ranking de usuarios sospechosos")
-	ranking = df_rasgos.sort_values('anomaly_score', ascending=False)
-	st.dataframe(ranking[['user_id', 'anomaly_score', 'es_sospechoso', 'likes', 'replies', 'num_posts', 'longitud_promedio', 'diversidad_lexica']])
+    st.header("Resultados del Modelo de Detección de Anomalías")
 
-	# --- Visualización interactiva con Plotly ---
-	st.subheader("Visualización de rasgos y anomalías")
-	# Normalizar anomaly_score para que sea positivo y adecuado para size
-	min_score = ranking['anomaly_score'].min()
-	size_score = ranking['anomaly_score'] - min_score + 0.1  # Sumar 0.1 para evitar ceros
-	fig1 = px.scatter(
-		ranking,
-		x='longitud_promedio',
-		y='diversidad_lexica',
-		color='es_sospechoso',
-		size=size_score,
-		hover_data=['user_id', 'likes', 'replies', 'num_posts'],
-		title='Usuarios: Longitud promedio vs Diversidad léxica'
-	)
-	st.plotly_chart(fig1, use_container_width=True)
+    # ================= RESULTADOS GRÁFICOS (MÚLTIPLES GRÁFICOS) =================
+    
+    st.subheader("📊 Comparación Individualizada de Métricas: Bots vs. Usuarios Normales")
+    st.markdown("Promedio de cada métrica de comportamiento y léxica, agrupado por la clasificación final. **(Escalas ajustadas por métrica)**")
+    
+    # --- Preparación de datos para el gráfico de comparación ---
+    df_comparison = df_users.groupby('es_bot')[features_conducta].mean().T.reset_index()
+    df_comparison.columns = ['Metrica', 'Usuario Normal', 'Bot Detectado']
+    
+    metric_map = {
+        'num_posts': 'Posts Totales',
+        'intervalo_medio': 'Intervalo Medio (min)',
+        'frecuencia_diaria': 'Frecuencia Diaria',
+        'nocturnidad': 'Actividad Nocturna (00-06h)',
+        'ttr': 'Diversidad Léxica (TTR)',
+        'tasa_repeticion': 'Tasa de Repetición',
+        'avg_likes': 'Likes Promedio',
+        'avg_replies': 'Respuestas Promedio',
+        'longitud_promedio': 'Longitud Promedio'
+    }
+    
+    # --- Creación de Gráficos Individuales ---
+    col1_graficos, col2_top = st.columns([2, 1])
+    
+    with col1_graficos:
+        cols = st.columns(2)
+        col_index = 0
+        
+        for original_metric, display_name in metric_map.items():
+            df_plot = df_comparison[df_comparison['Metrica'] == original_metric].copy()
+            df_long_single = pd.melt(df_plot, id_vars='Metrica', var_name='Clasificación', value_name='Valor Promedio')
+            
+            with cols[col_index % 2]:
+                fig_bar_single = px.bar(
+                    df_long_single, 
+                    x='Clasificación', 
+                    y='Valor Promedio', 
+                    color='Clasificación', 
+                    height=300,
+                    title=f'**{display_name}**',
+                    color_discrete_map={
+                        'Bot Detectado': 'salmon', 
+                        'Usuario Normal': 'lightseagreen'
+                    },
+                    labels={'Valor Promedio': 'Valor Promedio', 'Clasificación': 'Tipo de Usuario'}
+                )
+                fig_bar_single.update_layout(
+                    xaxis_title=None,
+                    title_x=0.5,
+                    legend_title_text='Tipo de Usuario',
+                    showlegend=True if col_index == 0 else False
+                )
+                st.plotly_chart(fig_bar_single, use_container_width=True)
+            col_index += 1
 
-	fig2 = px.histogram(
-		ranking,
-		x='anomaly_score',
-		color='es_sospechoso',
-		nbins=20,
-		title='Distribución de puntajes de anomalía'
-	)
-	st.plotly_chart(fig2, use_container_width=True)
+    with col2_top:
+        st.subheader("🚨 Top Sospechosos")
+        sospechosos = df_users.sort_values('risk_score', ascending=False).head(10)
+        
+        st.dataframe(
+            sospechosos[['user_id', 'risk_score', 'num_posts']],
+            column_config={
+                "risk_score": st.column_config.ProgressColumn(
+                    "Nivel de Riesgo",
+                    help="Probabilidad de que el usuario sea un bot",
+                    format="%.2f",
+                    min_value=0,
+                    max_value=1,
+                    width="medium",
+                ),
+                "num_posts": st.column_config.NumberColumn("Posts Totales", format="%d")
+            },
+            hide_index=True,
+            use_container_width=True
+        )
 
-	# --- Descarga de resultados ---
-	st.subheader("Descargar resultados")
-	csv = ranking.to_csv(index=False).encode('utf-8')
-	st.download_button(
-		label="Descargar ranking en CSV",
-		data=csv,
-		file_name='ranking_sospechosos.csv',
-		mime='text/csv'
-	)
+    st.divider()
+    
+    # ================= 6. CLASIFICACIÓN FINAL DE USUARIOS (DETALLADA) =================
+    st.header("Clasificación Final de Usuarios")
+    
+    total_bots = df_users['es_bot'].sum()
+    st.metric(label=f"Total de Usuarios Clasificados como Bots (Umbral > {umbral_risk_score*100:.0f}%)", value=total_bots, delta_color="inverse")
+    
+    st.markdown(f"La siguiente tabla muestra la clasificación final basada en el umbral dinámico de **Risk Score** (> {umbral_risk_score*100:.0f}%) e incluye todas las **métricas de comportamiento y léxicas** usadas en la detección.")
+    
+    features_conducta_display = [
+        'num_posts', 
+        'intervalo_medio', 
+        'frecuencia_diaria', 
+        'avg_likes', 
+        'avg_replies', 
+        'ttr', 
+        'longitud_promedio'
+    ]
+    
+    cols_to_show_final = ['user_id', 'risk_score', 'es_bot'] + features_conducta_display
+    df_final_detailed = df_users[cols_to_show_final].copy()
+    
+    df_final_detailed['Clasificación'] = df_final_detailed['es_bot'].map({
+        True: '🤖 Bot Detectado', 
+        False: '👤 Usuario Normal'
+    })
+    
+    column_config_map = {
+        "user_id": "ID de Usuario",
+        "Clasificación": "Clasificación Final",
+        "risk_score": st.column_config.ProgressColumn(
+            "Nivel de Riesgo",
+            help="Probabilidad de que el usuario sea un bot (0-100%)",
+            format="%.2f",
+            min_value=0,
+            max_value=1,
+            width="medium"
+        ),
+        "intervalo_medio": st.column_config.NumberColumn("Intervalo Medio (min)", format="%.2f min"),
+        "frecuencia_diaria": st.column_config.NumberColumn("Posts/Día (Aprox)", format="%.2f"),
+        "ttr": st.column_config.NumberColumn("Diversidad Léxica (TTR)", format="%.2f"),
+        "longitud_promedio": st.column_config.NumberColumn("Longitud Promedio", format="%.1f"),
+        "avg_likes": st.column_config.NumberColumn("Likes Promedio", format="%.1f"),
+        "avg_replies": st.column_config.NumberColumn("Respuestas Promedio", format="%.1f"),
+        "num_posts": st.column_config.NumberColumn("Posts Totales", format="%d"),
+        "es_bot": None
+    }
+    
+    display_order = ['user_id', 'Clasificación', 'risk_score'] + features_conducta_display
+    
+    st.dataframe(
+        df_final_detailed[display_order].sort_values(by='risk_score', ascending=False),
+        column_config=column_config_map,
+        hide_index=True,
+        use_container_width=True
+    )
+    
+    st.divider()
 
-	# --- Justificación del análisis ---
-	st.subheader("Justificación y explicación del análisis")
-	st.markdown("""
-	- Los usuarios marcados como **sospechosos** presentan comportamientos o contenidos atípicos según los rasgos analizados.
-	- Puedes explorar los gráficos para ver cómo se diferencian en longitud de texto, diversidad léxica y otras variables.
-	- El puntaje de anomalía es mayor para quienes más se alejan del comportamiento general.
-	- Revisa los usuarios con puntaje más alto y analiza si sus publicaciones justifican la sospecha de automatización.
-	""")
-else:
-	st.info("Por favor, sube un archivo CSV o usa el dataset de ejemplo.")
+    # ================= 7. ANÁLISIS INDIVIDUAL (SOLO MÉTRICAS) =================
+    st.subheader("Análisis Detallado por Usuario")
+    usuario_selec = st.selectbox("Seleccionar Usuario para auditar:", df_users['user_id'].unique())
+    
+    if usuario_selec:
+        user_data = df_users[df_users['user_id'] == usuario_selec].iloc[0]
+        
+        # --- FILA 1: Risk Score, Posts Totales y Rasgos de Comportamiento ---
+        st.markdown('**Comportamiento y Métricas Generales**')
+        col_r1_1, col_r1_2, col_r1_3, col_r1_4, col_r1_5 = st.columns(5)
+        
+        clasificacion = '🤖 BOT' if user_data['es_bot'] else '👤 Usuario'
+        col_r1_1.metric(f"Risk Score ({clasificacion})", f"{user_data['risk_score']:.2%}", delta_color="inverse")
+        col_r1_2.metric("Posts Totales", user_data['num_posts'])
+        col_r1_3.metric("Intervalo Medio", f"{user_data['intervalo_medio']:.2f} min")
+        col_r1_4.metric("Frecuencia Diaria", f"{user_data['frecuencia_diaria']:.2f}")
+        col_r1_5.metric("Actividad Nocturna", f"{user_data['nocturnidad']:.2%}", delta_color="inverse") 
+        
+        st.markdown('**Rasgos Léxicos y de Interacción**')
+        # --- FILA 2: Rasgos Léxicos y de Interacción ---
+        col_r2_1, col_r2_2, col_r2_3, col_r2_4, col_r2_5 = st.columns(5)
+        
+        col_r2_1.metric("Diversidad Léxica (TTR)", f"{user_data['ttr']:.2f}") 
+        col_r2_2.metric("Tasa de Repetición", f"{user_data['tasa_repeticion']:.2%}", delta_color="inverse")
+        col_r2_3.metric("Longitud Promedio", f"{user_data['longitud_promedio']:.2f}")
+        col_r2_4.metric("Likes Promedio", f"{user_data['avg_likes']:.2f}")
+        col_r2_5.metric("Respuestas Promedio", f"{user_data['avg_replies']:.2f}")
+
+        # Muestra de textos
+        with st.expander("Ver contenido textual del usuario"):
+            st.write(user_data['textos_raw'])
+            
+    # ================= 8. DESCARGA DE RESULTADOS FINALES =================
+    st.divider()
+    st.header("Descarga de Resultados")
+    st.markdown("Descargue el archivo CSV con la clasificación final de todos los usuarios, incluyendo su Nivel de Riesgo (Risk Score).")
+
+    # 1. Preparar el DataFrame para la descarga
+    df_download = df_users[['user_id', 'risk_score', 'es_bot']].copy()
+
+    df_download['Clasificacion_Final'] = df_download['es_bot'].map({
+        True: 'BOT DETECTADO', 
+        False: 'USUARIO NORMAL'
+    })
+    
+    df_download.rename(columns={
+        'user_id': 'ID_Usuario',
+        'risk_score': 'Nivel_Riesgo',
+    }, inplace=True)
+    
+    df_export = df_download[['ID_Usuario', 'Nivel_Riesgo', 'Clasificacion_Final']]
+
+    # 2. Convertir el DataFrame a CSV
+    @st.cache_data
+    def convert_df_to_csv(df):
+        return df.to_csv(index=False).encode('utf-8')
+
+    csv_data = convert_df_to_csv(df_export)
+    
+    # 3. Mostrar el botón de descarga
+    st.download_button(
+        label="Descargar Clasificación de Usuarios (CSV)",
+        data=csv_data,
+        file_name='BotBuster_Resultados_Clasificacion.csv',
+        mime='text/csv',
+        type="primary"
+    )
